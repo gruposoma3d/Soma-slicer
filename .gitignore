@@ -1,0 +1,7 @@
+site/slicer-mt.js
+site/slicer-mt.wasm
+node_modules/
+out/
+vendor/
+engine/
+tools/web/

@@ -1,0 +1,5 @@
+# Motor pinado (OrcaWasm release). O workflow baixa e confere o SHA-256 antes de publicar.
+TAG=wasm-v2.4.2-patch29-multithreaded
+BASE_URL=https://github.com/Hiosdra/OrcaWasm/releases/download/wasm-v2.4.2-patch29-multithreaded
+SHA256_JS=2ec6dced8758befae27f0e7adc7cb18273b14fb5db49f90c61876656ba2500fc
+SHA256_WASM=34614074e543bf51ca923606279673efaf8b628f80b513b96cb51c923ed574b0

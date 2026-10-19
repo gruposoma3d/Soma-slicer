@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soma 3D Web Slicer — teste do motor</title>
+<style>
+  body{font-family:system-ui,sans-serif;margin:0;padding:16px;max-width:760px;margin-inline:auto;line-height:1.4;color:#111;background:#fff}
+  @media (prefers-color-scheme:dark){body{color:#eee;background:#111}pre{background:#1d1d1d!important}}
+  h1{font-size:1.25rem;margin:.2em 0}
+  button{font-size:1rem;padding:.7em 1em;margin:.3em .3em .3em 0;border-radius:8px;border:1px solid #888;background:#0a6;color:#fff}
+  button.sec{background:#555} button:disabled{opacity:.5}
+  pre{background:#f3f3f3;padding:12px;border-radius:8px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:.82rem}
+  .ok{color:#0a6;font-weight:600}.bad{color:#d33;font-weight:600}
+  footer{margin-top:24px;font-size:.8rem;opacity:.8}
+</style>
+<!-- Isola a página (COOP/COEP) via service worker; GitHub Pages não permite definir cabeçalhos. -->
+<script src="coi-serviceworker.js"></script>
+</head>
+<body>
+<h1>Soma 3D Web Slicer — teste do motor</h1>
+<p>Fatia um cubo de 20 mm com o <b>motor real OrcaSlicer 2.4.2</b> (WebAssembly), perfil Creality Ender-3 V3 SE + PLA, <b>tudo no seu aparelho</b>.</p>
+<div id="status" class="bad">Iniciando…</div>
+<p>
+  <button id="run" disabled>1. Fatiar cubo</button>
+  <button id="heavy" class="sec" disabled>2. Teste pesado (esfera 82 mil triângulos) + cancelar</button>
+  <button id="dl" class="sec" disabled>Baixar G-code</button>
+  <button id="copy" class="sec">Copiar relatório</button>
+</p>
+<pre id="out">Aguardando…</pre>
+<footer>Software livre (AGPL-3.0). Código-fonte: <a href="https://github.com/gruposoma3d/Soma-slicer">github.com/gruposoma3d/Soma-slicer</a>.
+Motor: <a href="https://github.com/Hiosdra/OrcaWasm">OrcaWasm</a> / <a href="https://github.com/OrcaSlicer/OrcaSlicer">OrcaSlicer</a>.</footer>
+
+<script type="module">
+const enc = new TextEncoder(), dec = new TextDecoder()
+const $ = (id) => document.getElementById(id)
+const report = { quando: new Date().toISOString(), ua: navigator.userAgent }
+let engine = null, bundle = null, cube = null, lastGcode = null
+const show = () => { $('out').textContent = JSON.stringify(report, null, 1) }
+const setStatus = (t, ok) => { $('status').textContent = t; $('status').className = ok ? 'ok' : 'bad' }
+const t = () => performance.now()
+
+report.crossOriginIsolated = self.crossOriginIsolated
+report.secureContext = self.isSecureContext
+report.sharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined'
+report.nucleos = navigator.hardwareConcurrency
+report.memoriaGB_aprox = navigator.deviceMemory ?? null
+show()
+
+if (!self.crossOriginIsolated) {
+  // Primeira visita: o service worker registra e recarrega a página sozinho.
+  setStatus('Página ainda não isolada. Se não recarregar sozinha em alguns segundos, recarregue manualmente (puxe para atualizar).', false)
+} else {
+  try {
+    setStatus('Carregando motor (~28 MB)…', false)
+    const t0 = t()
+    const [b, c, e] = await Promise.all([
+      fetch('bundle.json').then(r => r.json()),
+      fetch('cube.stl').then(r => r.arrayBuffer()).then(x => new Uint8Array(x)),
+      loadEngine(),
+    ])
+    bundle = b; cube = c; engine = e
+    report.motorCarregadoMs = Math.round(t() - t0)
+    report.api = engine.capabilities?.api ?? null
+    setStatus('Isolado e motor pronto. Toque em “Fatiar cubo”.', true)
+    $('run').disabled = false; $('heavy').disabled = false
+  } catch (err) { report.erroCarga = String(err?.stack || err).slice(0, 600); setStatus('Falha ao carregar o motor.', false) }
+  show()
+}
+
+function loadEngine() {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = 'slicer-mt.js'
+    s.onload = () => OneSlicerEngine.createEngine().then(resolve, reject)
+    s.onerror = () => reject(new Error('não foi possível carregar slicer-mt.js'))
+    document.head.appendChild(s)
+  })
+}
+
+async function newSession() {
+  const s = await engine.createSession()
+  await s.init(enc.encode(JSON.stringify(bundle.init)))
+  for (const p of [bundle.machine, bundle.process, bundle.filament])
+    await s.applyProfile('orca.profile-json', enc.encode(JSON.stringify(p)))
+  await s.applyProfile('orca.native-json', enc.encode(JSON.stringify({ use_relative_e_distances: bundle.relE })))
+  return s
+}
+const manifest = (len, tx, ty) => ({
+  schemaVersion: '0.7.0',
+  plates: [{ id: 'plate-0', label: 'Plate 0', index: 0 }],
+  meshes: [{ id: 'mesh-0', format: 'stl', dataRange: { offset: 0, length: len } }],
+  objects: [{ id: 'object-0', meshId: 'mesh-0', extruderId: 0 }],
+  instances: [{ id: 'instance-0', objectId: 'object-0', plateId: 'plate-0', transform: { matrix: [1,0,0,tx, 0,1,0,ty, 0,0,1,0, 0,0,0,1] } }],
+  modifierVolumes: [],
+})
+const REQ = { schemaVersion: '0.7.0', plateSelection: 'all', includeGcode: true, includeStatistics: true }
+
+$('run').onclick = async () => {
+  $('run').disabled = true
+  try {
+    setStatus('Fatiando…', false)
+    const s = await newSession()
+    await s.setObjects(cube, manifest(cube.length, 100, 100))
+    const prog = []
+    const t0 = t()
+    const r = await s.slice(REQ, { onProgress: (p) => { prog.push(p); setStatus(`Fatiando… ${p.percent ?? '?'}% ${p.stage}`, false) } })
+    const pr = r.plateResults[0]
+    const g = dec.decode(await s.getAsset(pr.assets[0].id))
+    lastGcode = g
+    report.cubo = { ms: Math.round(t() - t0), gcodeBytes: g.length,
+      camadas: (g.match(/^;LAYER_CHANGE/gm) || []).length, cabecalhoOrca: g.includes('generated by OrcaSlicer'),
+      tempoEstimadoS: pr.statistics?.timeSeconds?.normal, filamentoG: pr.statistics?.filament?.totalMassG,
+      eventosProgresso: prog.length }
+    setStatus('Cubo fatiado com sucesso.', true); $('dl').disabled = false
+  } catch (err) { report.cubo = { erro: String(err?.stack || err).slice(0, 500) }; setStatus('Falha ao fatiar.', false) }
+  $('run').disabled = false; show()
+}
+
+$('heavy').onclick = async () => {
+  $('heavy').disabled = true
+  const h = { }
+  try {
+    setStatus('Baixando esfera e preparando…', false)
+    const sphere = await fetch('sphere.stl').then(r => r.arrayBuffer()).then(x => new Uint8Array(x))
+    const s = await newSession()
+    await s.setObjects(sphere, manifest(sphere.length, 110, 110))
+    // 2a) cancelamento aos 400 ms
+    const ac = new AbortController(); const t0 = t(); setTimeout(() => ac.abort(), 400)
+    try { await s.slice(REQ, { signal: ac.signal }); h.cancelamento = 'terminou antes de cancelar' }
+    catch (e) { h.cancelamento = { codigo: e.code ?? e.name, msg: String(e.message).slice(0, 80), msAteResponder: Math.round(t() - t0) } }
+    // 2b) fatiamento completo da esfera
+    setStatus('Fatiando esfera completa (pode levar minutos no celular)…', false)
+    const s2 = await newSession()
+    await s2.setObjects(sphere, manifest(sphere.length, 110, 110))
+    const t1 = t()
+    const r = await s2.slice(REQ, { onProgress: (p) => setStatus(`Esfera… ${p.percent ?? '?'}% ${p.stage}`, false) })
+    const g = dec.decode(await s2.getAsset(r.plateResults[0].assets[0].id))
+    h.esferaCompleta = { ms: Math.round(t() - t1), gcodeBytes: g.length, camadas: (g.match(/^;LAYER_CHANGE/gm) || []).length }
+    setStatus('Teste pesado concluído.', true)
+  } catch (err) { h.erro = String(err?.stack || err).slice(0, 500); setStatus('Teste pesado falhou (veja relatório).', false) }
+  report.pesado = h; $('heavy').disabled = false; show()
+}
+
+$('dl').onclick = () => {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(new Blob([lastGcode], { type: 'text/plain' }))
+  a.download = 'cubo20-ender3v3se.gcode'; a.click()
+}
+$('copy').onclick = async () => {
+  try { await navigator.clipboard.writeText(JSON.stringify(report, null, 1)); setStatus('Relatório copiado.', true) }
+  catch { setStatus('Não foi possível copiar; selecione o texto manualmente.', false) }
+}
+</script>
+</body>
+</html>
